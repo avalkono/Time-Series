@@ -1,0 +1,391 @@
+---
+title: "Time Series 2 HW 1"
+output: html_document
+date: "2024-09-26"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(readr)
+library(fpp3)
+library(datasets)
+library(fable)
+library(fabletools)
+library(lubridate)
+library(expsmooth)
+library(lmtest)
+library(zoo)
+library(seasonal)
+library(ggplot2)
+library(seasonalview)
+library(aTSA)
+library(imputeTS)
+library(forecast)
+```
+
+```{r}
+electric = read_csv('~/Downloads/Homework1_TS2/hrl_load_metered.csv', show_col_types = FALSE)
+electric = electric[c(1,6)]
+
+electric1 = read_csv("~/Downloads/Homework1_TS2/hrl_load_metered - test1.csv", show_col_types = FALSE)
+electric1 = electric1[c(1,6)]
+
+electric2 = read_csv("~/Downloads/Homework1_TS2/hrl_load_metered - test2.csv", show_col_types = FALSE)
+electric2 = electric2[c(1,6)]
+
+electric3 = read_csv("~/Downloads/Homework1_TS2/hrl_load_metered - test3.csv", show_col_types = FALSE)
+electric3 = electric3[c(1,6)]
+
+electric4 = read_csv("~/Downloads/Homework1_TS2/hrl_load_metered - test4.csv", show_col_types = FALSE)
+electric4 = electric4[c(1,6)]
+
+electric = rbind(electric, electric1, electric2, electric3, electric4)
+
+electric5 = read_csv("~/Downloads/Homework1_TS2/hrl_load_metered - test5.csv", show_col_types = FALSE)
+electric5 = electric5[c(2,7)]
+electric5$datetime_beginning_ept <- as.POSIXct(electric5$datetime_beginning_ept, format = "%m/%d/%Y %H:%M")
+electric5
+```
+
+```{r}
+electric_test = read_csv("~/Downloads/Homework1_TS2/hrl_load_metered - test6.csv", show_col_types = FALSE)
+electric_test = electric_test[c(1,6)]
+```
+
+```{r}
+electric = read_csv("~/Downloads/Homework1_TS2/energy_weather.csv")
+electric = electric[c(1,2)]
+electric
+```
+
+
+
+```{r}
+#convert date to correct type for indexing
+electric$datetime_beginning_ept <- as.POSIXct(electric$datetime_beginning_ept, format = "%Y/%m/%d %H:%M:%S", tz = "America/New_York")
+electric
+```
+
+
+```{r}
+electric_test <- electric |>filter(date(datetime_beginning_ept) >= as.Date("2024-10-18") &
+         date(datetime_beginning_ept) <= as.Date("2024-10-23"))
+electric <- electric %>% filter(date(datetime_beginning_ept) <= as.Date("2024-10-17"))
+```
+
+```{r}
+electric_test
+```
+
+
+
+```{r}
+#Find duplicate date times
+duplicate = duplicates(electric, index = datetime_beginning_ept)
+duplicate1 = duplicate[c(1,3,5,7,9), ]
+duplicate2 = duplicate[c(2,4,6,8,10), ]
+duplicate1
+duplicate2
+
+#Removed duplicated times from data
+electric <- electric %>% filter(!(electric$datetime_beginning_ept %in% duplicate$datetime_beginning_ept))
+duplicates(electric, index = datetime_beginning_ept)
+
+#Add back one set of duplicated times
+electric = rbind(electric,duplicate1)
+electric = electric %>% arrange(datetime_beginning_ept)
+duplicates(electric, index = datetime_beginning_ept)
+```
+
+```{r}
+#Create tsibble
+electric = as_tsibble(electric, index = datetime_beginning_ept)
+electric
+```
+
+
+```{r}
+#Add removed duplicates back to data 
+electric_fill <- electric %>%
+  tsibble::fill_gaps() %>%
+  mutate(mw = ifelse(is.na(mw), duplicate2$mw, mw))
+
+has_gaps(electric_fill)
+electric_fill %>% filter(is.na(mw))
+electric_fill %>% filter(datetime_beginning_ept %in% duplicate2$datetime_beginning_ept)
+```
+
+```{r}
+#Repeat for electric_test
+electric_test$datetime_beginning_ept <- as.POSIXct(electric_test$datetime_beginning_ept, format = "%m/%d/%y %H:%M", tz = "America/New_York")
+
+#Create tsibble
+electric_test = as_tsibble(electric_test, index = datetime_beginning_ept)
+electric_test
+```
+
+```{r}
+dcmp <- electric_fill |> model(stl = STL(mw))
+components(dcmp)
+
+#decomposition plot
+components(dcmp) |> autoplot() + theme_classic()
+```
+
+
+
+
+```{r}
+autoplot(electric_fill, mw) + labs(y="Megawatts (MW)", x= 'Hour', title="Megawatts by Hour (Aug 2018 - Jul 2022)") + theme(plot.title = element_text(hjust = 0.5, face='bold', size = 15))
+```
+
+
+```{r}
+electric_fit <- electric_fill |>
+  model(
+    SES = ETS(mw ~ error("A") + trend("N") + season("N")),
+    `Linear` = ETS(mw ~ error("A") + trend("A") + season("N")),
+    `Damped Linear` = ETS(mw ~ error("A") + trend("Ad") + season("N")),
+    HWAdd = ETS(mw ~ error("A") + trend("A") + season("A")),
+    HWMult = ETS(mw ~ error("M") + trend("A") + season("M"))
+  )
+
+electric_fc <- electric_fit |>fabletools::forecast(h = length(electric_test$datetime_beginning_ept))
+fabletools::accuracy(electric_fc, electric_test)
+```
+
+
+
+
+```{r}
+HWAdd <- electric_fill |> model(ETS(mw ~ error("A") + trend("A") + season("A")))
+electric.for <- HWAdd |> fabletools::forecast(h=length(electric_test$datetime_beginning_ept))
+report(HWAdd)
+
+HW_for_df = data.frame(
+  datetime_beginning_ept = electric.for$datetime_beginning_ept,
+  Actual = electric_test$mw,
+  Predicted = electric.for$.mean
+)
+
+HW_for_data_long <- HW_for_df%>%
+  pivot_longer(cols = c(Actual, Predicted), names_to = "Metric", values_to = "Value")
+
+
+electric.for|> autoplot(electric_test, level=0) + labs(y="Megawatts", title="Actual vs Predicted MW (9/13/24-9/19/24)", x= "Hour") + theme_minimal() + theme(legend.position = 'none', plot.title = element_text(hjust = 0.5, face = 'bold', size=15), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)))
+
+
+plot1=ggplot(HW_for_data_long, aes(x=datetime_beginning_ept, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Hourly MW", x= "Time") + 
+    scale_color_manual(values = c("Actual" = "black", "Predicted" = "blue")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+
+ggsave(plot1, file = "ESMforecast.png", width = 7, height = 5, dpi = 700)
+```
+
+
+ARIMA Model:
+```{r}
+electric_fill |> features(mw, unitroot_nsdiffs)
+```
+
+
+```{r}
+#Dummy Variables
+model_SD_ARIMA <- electric_fill %>%
+  model(ARIMA(mw ~ factor(datetime_beginning_ept) + PDQ(D = 0)))
+report(model_SD_ARIMA)
+```
+
+```{r}
+#Fourier Terms
+model_F_ARIMA <- electric_fill %>%
+  model(
+  `K = 1` = ARIMA(mw ~ fourier(K=1) + PDQ(D = 0)),
+  `K = 2` = ARIMA(mw ~ fourier(K=2) + PDQ(D = 0)),
+  `K = 3` = ARIMA(mw ~ fourier(K=3) + PDQ(D = 0)),
+  `K = 4` = ARIMA(mw ~ fourier(K=4) + PDQ(D = 0)),
+  `K = 5` = ARIMA(mw ~ fourier(K=5) + PDQ(D = 0)),
+  `K = 6` = ARIMA(mw ~ fourier(K=6) + PDQ(D = 0)))
+
+glance(model_F_ARIMA)
+```
+```{r}
+model_F_ARIMA2 <- electric_fill %>%
+  model(
+  `K = 7` = ARIMA(mw ~ fourier(K=7) + PDQ(D = 0)),
+  `K = 8` = ARIMA(mw ~ fourier(K=8) + PDQ(D = 0)),
+  `K = 9` = ARIMA(mw ~ fourier(K=9) + PDQ(D = 0)),
+  `K = 10` = ARIMA(mw ~ fourier(K=10) + PDQ(D = 0)),
+  `K = 11` = ARIMA(mw ~ fourier(K=11) + PDQ(D = 0)),
+  `K = 12` = ARIMA(mw ~ fourier(K=12) + PDQ(D = 0)))
+
+glance(model_F_ARIMA2)
+```
+
+
+```{r}
+#Stochastic differencing
+electric_fill |> features(mw, unitroot_ndiffs)
+
+electric_fill %>%
+  mutate(mw_diff = difference(mw, lag = 24)) %>%
+  features(mw_diff, unitroot_ndiffs)
+
+electric_fill %>%
+  mutate(mw_diff = difference(mw, lag = 24)) %>%
+  features(mw_diff, unitroot_kpss)
+
+electric_fill %>%
+gg_tsdisplay(difference(mw, 24), plot_type = 'partial', lag = 72)
+```
+
+```{r}
+#Building ARIMA models
+model_SARIMA <- electric_fill %>% 
+  model(
+    hand = ARIMA(mw ~ pdq(2,0,0) + PDQ(2,1,0) + 0 ),
+    hand2 = ARIMA(mw ~ pdq(1,0,2) + PDQ(2,1,0) + 0 ),
+    auto = ARIMA(mw)
+  )
+```
+
+```{r}
+model_SARIMA %>%
+  report
+
+model_SARIMA %>%
+  dplyr::select(auto) %>%
+  report
+```
+
+```{r}
+model_SARIMA %>%
+  dplyr::select(auto) %>%
+  gg_tsresiduals(lag = 72)
+```
+
+```{r}
+augment(model_SARIMA) %>%
+  filter(.model == "auto") %>%
+  features(.innov, ljung_box, lag = 72, dof = 6)
+```
+
+```{r}
+model_SARIMA_auto <- model_SARIMA %>% dplyr::select(auto)
+model_SARIMA_for <- fabletools::forecast(model_SARIMA_auto, h = 168)
+
+model_SARIMA_for %>%
+  autoplot(electric_test, level=0) +
+  autolayer(fitted(model_SARIMA), col = "blue", linetype = "dashed") + xlim(min(electric_test$datetime_beginning_ept), max(electric_test$datetime_beginning_ept)) + ylim(3000,5250)
+
+```
+
+```{r}
+fabletools::accuracy(model_SARIMA_for$.mean, electric_test$mw)
+```
+
+```{r}
+for_df = data.frame(
+  datetime_beginning_ept = model_SARIMA_for$datetime_beginning_ept,
+  Actual = electric_test$mw,
+  Predicted = model_SARIMA_for$.mean
+)
+
+for_data_long <- for_df%>%
+  pivot_longer(cols = c(Actual, Predicted), names_to = "Metric", values_to = "Value")
+
+plot2=ggplot(for_data_long, aes(x=datetime_beginning_ept, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Hourly MW", x= "Time") + 
+    scale_color_manual(values = c("Actual" = "black", "Predicted" = "blue")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+
+#ggsave(plot2, file = "ARIMAforecast.png", width = 7, height = 5, dpi = 700)
+```
+
+
+Test data:
+```{r}
+electric_fill_combined = dplyr::bind_rows(electric_fill, electric_test)
+
+electric_test2 = read_csv("hrl_load_metered - test2.csv", show_col_types = FALSE)
+electric_test2 = electric_test2[c(1,6)]
+
+electric_test2$datetime_beginning_ept <- as.POSIXct(electric_test2$datetime_beginning_ept, format = "%m/%d/%y %H:%M", tz = "America/New_York")
+
+electric_test2 = as_tsibble(electric_test2, index = datetime_beginning_ept)
+electric_test2
+```
+
+```{r}
+model_SARIMA2 <- electric_fill_combined %>% 
+  model(
+    auto = ARIMA(mw)
+  )
+
+model_SARIMA2 %>%
+  dplyr::select(auto) %>%
+  report
+```
+```{r}
+model_SARIMA2_auto <- model_SARIMA2 %>% dplyr::select(auto)
+model_SARIMA2_for <- fabletools::forecast(model_SARIMA2_auto, h = 168)
+
+fabletools::accuracy(model_SARIMA2_for$.mean, electric_test2$mw)
+```
+
+```{r}
+model_SARIMA2_for %>%
+  autoplot(electric_test2, level=0) +
+  xlim(min(electric_test2$datetime_beginning_ept), max(electric_test2$datetime_beginning_ept)) + ylim(3000,5250) + labs(y="Megawatts (MW)", title="Actual vs Predicted MW", x= "Time") + theme_minimal() + theme(legend.position = 'none', plot.title = element_text(hjust = 0.5, face = 'bold', size=15), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)))
+
+```
+
+```{r}
+electric_test
+```
+
+
+```{r}
+nrg_weather_diff <- electric_fill %>%
+  mutate(diff_mw = difference(mw, 24)) %>% filter(!is.na(diff_mw))
+
+model_nnet <- nrg_weather_diff %>%
+  model(
+    hand3 = NNETAR(diff_mw ~ AR(p = 1, P = 1)),
+  )
+
+model_nnet_for <- forecast::forecast(model_nnet, electric_test)
+
+nnet_for_hand3 <- rep(NA, 144)
+
+model_nnet_for_hand3 = model_nnet_for %>% filter(.model=='hand3')
+
+last_value <- tail(electric_fill$mw, 24)
+
+for(i in 1:24){
+  nnet_for_hand3[i] <- last_value[i] + model_nnet_for_hand3$.mean[i]
+}
+for(i in 25:44){
+  nnet_for_hand3[i] <- nnet_for_hand3[i - 24] + model_nnet_for_hand3$.mean[i]
+}
+
+```
+
+```{r}
+nnet_for_hand3
+```
+
+```{r}
+NN_error_hand3 <- electric_test$mw - nnet_for_hand3
+NN_MAE_hand3 <- mean(abs(NN_error_hand3))
+NN_MAPE_hand3 <- mean(abs(NN_error_hand3)/abs(nrg_3_test$mw))*100
+
+NN_MAPE_hand3 
+NN_MAE_hand3
+```
+
+```{r}
+sd(electric_test$mw)
+```
+
