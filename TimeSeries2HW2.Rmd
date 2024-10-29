@@ -1,0 +1,493 @@
+---
+title: "Time Series 2 HW 2"
+output: html_document
+date: "2024-10-11"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(readr)
+library(fpp3)
+library(datasets)
+library(fable)
+library(fabletools)
+library(lubridate)
+library(expsmooth)
+library(lmtest)
+library(zoo)
+library(seasonal)
+library(ggplot2)
+library(seasonalview)
+library(aTSA)
+library(imputeTS)
+library(forecast)
+library(fable.prophet)
+```
+
+```{r}
+electric = read_csv("~/Downloads/Homework2_TS2/hrl_load_metered.csv", show_col_types = FALSE)
+electric
+electric = electric[c(1,6)]
+
+electric2 = read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test1.csv", show_col_types = FALSE)
+electric2 = electric2[c(1,6)]
+
+electric3 = read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test2 copy.csv", show_col_types = FALSE)
+electric3 = electric3[c(1,6)]
+
+electric4 = read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test3 copy.csv", show_col_types = FALSE)
+electric4 = electric4[c(1,6)]
+
+electric5 = read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test4.csv", show_col_types = FALSE)
+electric5 = electric5[c(1,6)]
+
+electric = rbind(electric, electric2, electric3, electric4, electric5)
+
+validation = read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test5.csv", show_col_types = FALSE)
+#validation = validation[c()]
+```
+
+
+```{r}
+validation
+```
+
+
+```{r}
+#Correcting for daylight savings
+electric$datetime_beginning_ept <- as.POSIXct(electric$datetime_beginning_ept, format = "%m/%d/%y %H:%M", tz = "America/New_York")
+
+#Find duplicate date times
+duplicate = duplicates(electric, index = datetime_beginning_ept)
+duplicate1 = duplicate[c(1,3,5,7,9), ]
+duplicate2 = duplicate[c(2,4,6,8,10), ]
+
+#Removed duplicated times from data
+electric <- electric %>% filter(!(electric$datetime_beginning_ept %in% duplicate$datetime_beginning_ept))
+
+#Add back one set of duplicated times
+electric = rbind(electric,duplicate1)
+electric = electric %>% arrange(datetime_beginning_ept)
+
+#Make tsibble
+electric = as_tsibble(electric, index = datetime_beginning_ept)
+
+#Add back removed duplicates
+electric_fill <- electric %>%
+  tsibble::fill_gaps() %>%
+  mutate(mw = ifelse(is.na(mw), duplicate2$mw, mw))
+
+has_gaps(electric_fill)
+electric_fill %>% filter(is.na(mw))
+```
+
+```{r}
+#Repeat for validation
+validation$datetime_beginning_ept <- as.POSIXct(validation$datetime_beginning_ept, format = "%m/%d/%y %H:%M", tz = "America/New_York")
+
+#Create tsibble
+validation = as_tsibble(validation, index = datetime_beginning_ept)
+```
+
+
+```{r}
+#Decomposition
+dcmp <- electric_fill |> model(stl = STL(mw))
+components(dcmp) |> autoplot() + theme_classic()
+```
+
+
+Prophet Model:
+```{r}
+model_prophet <- electric_fill %>%
+  model(fable.prophet::prophet(mw ~ growth("linear") + 
+                  season(period = "year", order = 12, type = "additive")))
+
+model_prophet %>% 
+  components() %>%
+  autoplot()
+
+model_prophet %>%
+  gg_tsresiduals()
+
+augment(model_prophet) %>%
+  features(.innov, ljung_box, lag = 36, dof = 5)
+
+model_prophet_for <- forecast::forecast(model_prophet, validation)
+
+model_prophet_for %>%
+  autoplot(electric_fill, level=0) + 
+  autolayer(fitted(model_prophet), col = "blue", linetype = "dashed") + 
+  ylab("Airlines Passengers") + 
+  geom_vline(xintercept = as_date("2007-03-15"), color="orange", linetype="longdash")
+
+fabletools::accuracy(model_prophet_for, validation)
+```
+
+```{r}
+pro_for_df = data.frame(
+  datetime_beginning_ept = model_prophet_for$datetime_beginning_ept,
+  Actual = validation$mw,
+  Predicted = model_prophet_for$.mean
+)
+
+pro_for_data_long <- pro_for_df%>%
+  pivot_longer(cols = c(Actual, Predicted), names_to = "Metric", values_to = "Value")
+
+
+ggplot(pro_for_data_long, aes(x=datetime_beginning_ept, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Hourly MW", x= "Time") + 
+    scale_color_manual(values = c("Actual" = "black", "Predicted" = "blue")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+```
+
+```{r}
+#With weekly
+model_prophet2 <- electric_fill %>%
+  model(fable.prophet::prophet(mw ~ growth("linear") + 
+                  season(period = "year", order = 4, type = "additive") +
+                  season(period = "week", order = 7, type = "additive")))
+
+model_prophet2 %>% 
+  components() %>%
+  autoplot()
+
+model_prophet2 %>%
+  gg_tsresiduals()
+
+augment(model_prophet2) %>%
+  features(.innov, ljung_box, lag = 36, dof = 5)
+
+model_prophet_for2 <- forecast::forecast(model_prophet_log, validation)
+
+model_prophet_for2 %>%
+  autoplot(electric_fill, level=0) + 
+  autolayer(fitted(model_prophet), col = "blue", linetype = "dashed") + 
+  ylab("Airlines Passengers") + 
+  geom_vline(xintercept = as_date("2007-03-15"), color="orange", linetype="longdash")
+
+fabletools::accuracy(model_prophet_for2, validation)
+```
+
+
+```{r}
+pro_for_df2 = data.frame(
+  datetime_beginning_ept = model_prophet_for2$datetime_beginning_ept,
+  Actual = validation$mw,
+  Predicted = model_prophet_for2$.mean
+)
+
+pro_for_data_long2 <- pro_for_df2%>%
+  pivot_longer(cols = c(Actual, Predicted), names_to = "Metric", values_to = "Value")
+
+
+ggplot(pro_for_data_long2, aes(x=datetime_beginning_ept, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Hourly MW - Prophet", x= "Time") + 
+    scale_color_manual(values = c("Actual" = "black", "Predicted" = "blue")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+```
+```{r}
+library(purrr)
+
+holiday_dates <- tibble(
+  holiday = c("New Year's Day", "New Year's Day", "New Year's Day", "New Year's Day", "Independence Day",  "Independence Day", "Independence Day", "Independence Day", "Thanksgiving", "Thanksgiving","Thanksgiving", "Christmas", "Christmas","Christmas", "Halloween", "Halloween", "Halloween"),
+  ds = as.Date(c("2021-01-01", "2022-01-01", "2023-01-01", "2024-01-01", "2021-07-04", "2022-07-04", "2023-07-04", "2024-07-04", "2021-11-25", "2022-11-24", "2023-11-23", "2021-12-25", "2022-12-25", "2023-12-25", "2021-10-31", "2022-10-31", "2022-10-31")),
+  lower_window = 0,
+  upper_window = 1  
+)
+
+print(holiday_dates)
+```
+
+
+```{r}
+library(prophet)
+prophet_model <- prophet::prophet(yearly.seasonality = TRUE, 
+  weekly.seasonality = TRUE, holidays = holiday_dates)
+
+prophetdata = electric_fill %>% rename('ds' = 'datetime_beginning_ept', 'y'='mw')
+
+
+
+# Fit the model to the data
+model_prophet2 <- prophet::fit.prophet(prophet_model, prophetdata)
+                  
+future <- prophet::make_future_dataframe(model_prophet2, periods = 168)  # Extend for 365 days or the desired number of future periods
+forecast <- predict(model_prophet2, future)
+
+plot(model_prophet2, forecast) +
+  add_changepoints_to_plot(model_prophet2)
+
+
+actual <- validation$mw
+predicted <- forecast$yhat[1:nrow(validation)]
+
+library(Metrics)
+mae <- mae(actual, predicted)
+rmse <- rmse(actual, predicted)
+print(paste("MAE:", mae))
+print(paste("RMSE:", rmse))
+
+```
+
+
+Neural Network:
+```{r}
+electric_fill %>%
+gg_tsdisplay(difference(mw, 24), plot_type = 'partial', lag = 36)
+```
+
+```{r}
+set.seed(12345)
+electric_fill_diff = electric_fill %>%
+  mutate(diff_mw = difference(mw, 24)) %>% filter(!is.na(diff_mw)) 
+
+model_nnet <- electric_fill_diff %>%
+  model(
+    hand = NNETAR(diff_mw ~ AR(p = 3, P = 1)), 
+    hand2 = NNETAR(diff_mw ~ AR(p = 2, P = 2)),
+    hand3 = NNETAR(diff_mw ~ AR(p = 2, P = 1)),
+    hand4 = NNETAR(diff_mw ~ AR(p = 1, P = 2))
+  )
+
+
+model_nnet %>%
+  dplyr::select(hand) %>%
+  report()
+
+
+model_nnet %>%
+  dplyr::select(hand) %>%
+  gg_tsresiduals()
+
+model_nnet %>%
+  dplyr::select(hand2) %>%
+  report()
+
+
+model_nnet %>%
+  dplyr::select(hand2) %>%
+  gg_tsresiduals()
+
+```
+
+
+```{r}
+model_nnet_for <- forecast::forecast(model_nnet, validation)
+nnet_for_hand <- rep(NA, 168)
+nnet_for_hand2 <- rep(NA, 168)
+nnet_for_hand3 <- rep(NA, 168)
+nnet_for_hand4 <- rep(NA, 168)
+```
+
+```{r}
+model_nnet_for_hand = model_nnet_for %>% filter(.model=='hand')
+model_nnet_for_hand2 = model_nnet_for %>% filter(.model=='hand2')
+model_nnet_for_hand3 = model_nnet_for %>% filter(.model=='hand3')
+model_nnet_for_hand4 = model_nnet_for %>% filter(.model=='hand4')
+
+last_value <- tail(electric_fill$mw, 24)
+
+for(i in 1:24){
+nnet_for_hand[i] <- last_value[i] + model_nnet_for_hand$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand[i] <- nnet_for_hand[i - 24] + model_nnet_for_hand$.mean[i]
+}
+
+for(i in 1:24){
+nnet_for_hand2[i] <- last_value[i] + model_nnet_for_hand2$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand2[i] <- nnet_for_hand2[i - 24] + model_nnet_for_hand2$.mean[i]
+}
+
+for(i in 1:24){
+nnet_for_hand3[i] <- last_value[i] + model_nnet_for_hand3$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand3[i] <- nnet_for_hand3[i - 24] + model_nnet_for_hand3$.mean[i]
+}
+
+for(i in 1:24){
+nnet_for_hand4[i] <- last_value[i] + model_nnet_for_hand4$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand4[i] <- nnet_for_hand4[i - 24] + model_nnet_for_hand4$.mean[i]
+}
+```
+
+
+```{r}
+NN_error_hand2 <- validation$mw - nnet_for_hand2
+NN_MAE_hand2 <- mean(abs(NN_error_hand2))
+NN_MAPE_hand2 <- mean(abs(NN_error_hand2)/abs(validation$mw))*100
+
+NN_error_hand <- validation$mw - nnet_for_hand
+NN_MAE_hand <- mean(abs(NN_error_hand))
+NN_MAPE_hand <- mean(abs(NN_error_hand)/abs(validation$mw))*100
+
+NN_error_hand3 <- validation$mw - nnet_for_hand3
+NN_MAE_hand3 <- mean(abs(NN_error_hand3))
+NN_MAPE_hand3 <- mean(abs(NN_error_hand3)/abs(validation$mw))*100
+
+NN_error_hand4 <- validation$mw - nnet_for_hand4
+NN_MAE_hand4 <- mean(abs(NN_error_hand4))
+NN_MAPE_hand4 <- mean(abs(NN_error_hand4)/abs(validation$mw))*100
+```
+
+```{r}
+NN_MAE_hand2
+NN_MAPE_hand2
+
+NN_MAE_hand
+NN_MAPE_hand
+
+NN_MAE_hand3
+NN_MAPE_hand3
+
+NN_MAE_hand4
+NN_MAPE_hand4
+```
+
+```{r}
+set.seed(12345)
+electric_fill_diff = electric_fill %>%
+  mutate(diff_mw = difference(mw, 24)) %>% filter(!is.na(diff_mw)) 
+
+model_nnet <- electric_fill_diff %>%
+  model(
+    hand = NNETAR(diff_mw ~ AR(p = 3, P = 2)), 
+    hand2 = NNETAR(diff_mw ~ AR(p = 4, P = 1)),
+    hand3 = NNETAR(diff_mw ~ AR(p = 2, P = 3)),
+    hand4 = NNETAR(diff_mw ~ AR(p = 1, P = 3))
+  )
+
+model_nnet_for <- forecast::forecast(model_nnet, validation)
+nnet_for_hand <- rep(NA, 168)
+nnet_for_hand2 <- rep(NA, 168)
+nnet_for_hand3 <- rep(NA, 168)
+nnet_for_hand4 <- rep(NA, 168)
+
+model_nnet_for_hand = model_nnet_for %>% filter(.model=='hand')
+model_nnet_for_hand2 = model_nnet_for %>% filter(.model=='hand2')
+model_nnet_for_hand3 = model_nnet_for %>% filter(.model=='hand3')
+model_nnet_for_hand4 = model_nnet_for %>% filter(.model=='hand4')
+
+last_value <- tail(electric_fill$mw, 24)
+
+for(i in 1:24){
+nnet_for_hand[i] <- last_value[i] + model_nnet_for_hand$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand[i] <- nnet_for_hand[i - 24] + model_nnet_for_hand$.mean[i]
+}
+
+for(i in 1:24){
+nnet_for_hand2[i] <- last_value[i] + model_nnet_for_hand2$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand2[i] <- nnet_for_hand2[i - 24] + model_nnet_for_hand2$.mean[i]
+}
+
+for(i in 1:24){
+nnet_for_hand3[i] <- last_value[i] + model_nnet_for_hand3$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand3[i] <- nnet_for_hand3[i - 24] + model_nnet_for_hand3$.mean[i]
+}
+
+for(i in 1:24){
+nnet_for_hand4[i] <- last_value[i] + model_nnet_for_hand4$.mean[i]
+}
+
+for(i in 25:168){
+nnet_for_hand4[i] <- nnet_for_hand4[i - 24] + model_nnet_for_hand4$.mean[i]
+}
+
+NN_error_hand2 <- validation$mw - nnet_for_hand2
+NN_MAE_hand2 <- mean(abs(NN_error_hand2))
+NN_MAPE_hand2 <- mean(abs(NN_error_hand2)/abs(validation$mw))*100
+
+NN_error_hand <- validation$mw - nnet_for_hand
+NN_MAE_hand <- mean(abs(NN_error_hand))
+NN_MAPE_hand <- mean(abs(NN_error_hand)/abs(validation$mw))*100
+
+NN_error_hand3 <- validation$mw - nnet_for_hand3
+NN_MAE_hand3 <- mean(abs(NN_error_hand3))
+NN_MAPE_hand3 <- mean(abs(NN_error_hand3)/abs(validation$mw))*100
+
+NN_error_hand4 <- validation$mw - nnet_for_hand4
+NN_MAE_hand4 <- mean(abs(NN_error_hand4))
+NN_MAPE_hand4 <- mean(abs(NN_error_hand4)/abs(validation$mw))*100
+
+NN_MAE_hand2
+NN_MAPE_hand2
+
+NN_MAE_hand
+NN_MAPE_hand
+
+NN_MAE_hand3
+NN_MAPE_hand3
+
+NN_MAE_hand4
+NN_MAPE_hand4
+```
+
+
+```{r}
+model_nnet_for_df = data.frame(
+  datetime_beginning_ept = model_nnet_for_hand$datetime_beginning_ept,
+  Actual = validation$mw,
+  Predicted = nnet_for_hand
+)
+
+model_nnet_for_long <- model_nnet_for_df%>%
+  pivot_longer(cols = c(Actual, Predicted), names_to = "Metric", values_to = "Value")
+
+
+ggplot(model_nnet_for_long, aes(x=datetime_beginning_ept, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Hourly MW - Prophet", x= "Time") + 
+    scale_color_manual(values = c("Actual" = "black", "Predicted" = "blue")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+```
+```{r}
+set.seed(12345)
+electric_fill_diff = electric_fill %>%
+  mutate(diff_mw = difference(mw, 24)) %>% filter(!is.na(diff_mw)) 
+
+model_nnet <- electric_fill_diff %>%
+  model(
+    hand = fable::NNETAR(diff_mw, p = 1, P = 1), 
+    auto = fable::NNETAR(diff_mw)
+  )
+
+model_nnet %>%
+dplyr::select(auto) %>%
+report()
+
+model_nnet %>%
+  dplyr::select(hand) %>%
+  report()
+
+
+model_nnet %>%
+  dplyr::select(hand) %>%
+  gg_tsresiduals()
+
+model_nnet %>%
+  dplyr::select(auto) %>%
+  gg_tsresiduals()
+```
+
+
+
+
+
