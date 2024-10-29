@@ -1,0 +1,453 @@
+---
+title: "Times Series HW"
+output: 
+  github_document:
+    fig_width: 5
+    fig_height: 5
+    dev: png
+date: "2024-08-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readr)
+library(fpp3)
+library(datasets)
+library(fable)
+library(fabletools)
+library(lubridate)
+library(expsmooth)
+library(lmtest)
+library(zoo)
+library(seasonal)
+library(ggplot2)
+library(seasonalview)
+library(aTSA)
+```
+
+
+HW 0:
+```{r}
+air <- read_csv('https://raw.githubusercontent.com/sjsimmo2/TimeSeries/master/usairlines.csv')
+air.ts<- air %>% mutate(date=mdy(paste(Month, "1",Year))) %>%  mutate(Month.ts = yearmonth(date)) %>% as_tsibble(index = Month.ts)
+air.ts
+```
+
+```{r}
+count_gaps(air.ts)
+autoplot(air.ts, Passengers)
+```
+
+```{r}
+energy <- read_csv('energy_F2024.csv', show_col_types = FALSE)
+energy <- energy %>% mutate(datetime_beginning_utc = mdy_hm(energy$datetime_beginning_utc), datetime_beginning_ept = mdy_hm(energy$datetime_beginning_ept))
+energy <- energy %>% mutate(date = date(energy$datetime_beginning_ept))
+energy
+
+
+energy2 <- energy %>% group_by(date) %>% summarise(mw=sum(mw))
+energy2 %>% arrange(desc(mw))
+max(energy2$mw)
+```
+
+```{r}
+energy.ts <- as_tsibble(energy2, index=date)
+energy.ts
+count_gaps(energy.ts)
+```
+
+
+
+
+HW 1:
+```{r}
+energy <- read_csv('energy_F2024.csv', show_col_types = FALSE)
+energy <- energy %>% mutate(datetime_beginning_utc = mdy_hm(energy$datetime_beginning_utc), datetime_beginning_ept = mdy_hm(energy$datetime_beginning_ept))
+energy <- energy %>% mutate(date = date(energy$datetime_beginning_ept))
+energy2 <- energy %>% group_by(date) %>% summarise(mw=sum(mw))
+energy.ts <- as_tsibble(energy2, index=date)
+#energy.ts$yr_month = format(energy.ts$date, "%Y-%m")
+#energy.ts$ym = ym(energy.ts$yr_month)
+energy.ts$yr_month = yearmonth(energy.ts$date)
+
+energy.month = energy.ts[, -1] %>% group_by(yr_month) %>% summarise(mw = mean(mw)) %>% as_tsibble(index=yr_month)
+energy.month
+
+train = energy.month[c(1:48),]
+validation = energy.month[c(49:60),]
+test = energy.month[c(61:72),]
+```
+
+1. Using the total daily average by month in the training data set, what is the median value? 
+```{r}
+median(train$mw)
+```
+
+
+2. Decompose your training data by using the STL decomposition assuming there is a monthly seasonality. Describe what you see in your decomposition. Describe what you observe for each component (feel free to use other plots to help you describe seasonality and trend). Which components explain the most variability? Use your Fs and Ft to help guide your discussions.
+```{r}
+energy_dcmp <- train |> model(stl = STL(mw))
+components(energy_dcmp)
+
+#decomposition plot
+components(energy_dcmp) |> autoplot() + theme_classic()
+
+#decomposition trend overlay
+components(energy_dcmp) |> as_tsibble() |> autoplot(mw, colour="gray") + geom_line(aes(y=trend), colour = "#D55E00") + labs( y = "Passengers", title = "Avg Monthly Megawatts with trend overlaid" )
+
+#seasonal plot
+train |> gg_season(mw, labels = "both") + labs(y = "MW", title = "Seasonal plot: Avg MW by Month")
+
+#seasonal subplots
+train |> gg_subseries(mw) + labs( y = "MW", title = "Seasonal Subplots: Avg MW by Month" )
+```
+The seasonal component has a clear, repetitive pattern over time. Average daily MW usage appears to peak during January of each year, then goes down to its lowest usage in April or May, then raises to a smaller peak in July followed again by lower usage in October. The seasonal strength value for this data is about 0.91, meaning that there is strong seasonality in this data, which is clearly shown in the STL decomposition plot. This can also be confirmed by looking at seasonal plot, which shows a similar pattern of average daily MW usage in each month of every year. The trend component shows a slight downward trend until about mid-2020 where it then changes to a slightly upward trend. This is also seen in the time plot with trend overlaid, which follows the height of the peaks in each year. The peaks get smaller following January 2019, but then get higher again starting in January 2021, which follows the path of the trend line. The trend strength value is about 0.37, meaning that a trend is present but not very strong, which is seen in both of these plots. The remainder values fluctuate between -4000 and 4000, which are relatively small since the MW values are typically over 100000. This indicates that the seasonal and trend components describe the time series well. The seasonal component explains the most variability.
+
+
+3. Create a time plot of the total daily AVERAGE MW by month and upload it. Be sure your graph has appropriate axes, labels and title.
+```{r}
+autoplot(train, mw) + labs(y="Megawatts (MW)", x= "Month [1M]", title="Average Megawatts by Month (Aug 2018 - Jul 2022)") + theme(plot.title = element_text(hjust = 0.5, face='bold', size = 15))
+```
+
+
+4. What is your value for Fs? 0.9141054
+5. What is your value for Ft? 0.3680337	
+```{r}
+train |> features(mw, feat_stl)
+```
+
+
+
+
+HW 2:
+```{r}
+energy <- read_csv('energy_F2024.csv', show_col_types = FALSE)
+energy
+
+#Convert to date-time and pull out date only
+energy <- energy %>% mutate(datetime_beginning_ept = mdy_hm(energy$datetime_beginning_ept))
+energy <- energy %>% mutate(date = date(energy$datetime_beginning_ept))
+
+#Roll up to total daily MW
+energy2 <- energy %>% group_by(date) %>% summarise(mw=sum(mw))
+
+#Average MW by month
+energy2 <- energy2 %>% mutate(yr_month = yearmonth(energy2$date))
+energy2 <- energy2 %>% group_by(yr_month) %>% summarise(mw=mean(mw))
+energy2
+
+#Convert to tsibble
+energy.ts <- as_tsibble(energy2, index=yr_month)
+energy.ts
+
+#Create train, validation, and test
+train = energy.month[c(1:48),]
+validation = energy.month[c(49:60),]
+test = energy.month[c(61:72),]
+```
+
+
+Training Dataset Trend (STL decomposition):
+```{r}
+energy_dcmp <- train |> model(stl = STL(mw))
+components(energy_dcmp)
+
+#decomposition plot
+components(energy_dcmp) |> autoplot() + theme_classic()
+
+#decomposition trend overlay
+components(energy_dcmp) |> as_tsibble() |> autoplot(mw, colour="black") + geom_line(aes(y=trend), colour = "#D55E00", size=1) + labs( y = "Megawatts", x="Year Month", title = "Average Megawatts Per Month (Aug 2018 - Jul 2022)", subtitle="Overlaid with STL Decomposition Trend" ) + theme_minimal() + theme(legend.position="none", plot.title = element_text(hjust = 0.5, face = 'bold', size=15), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)))
+
+#ggsave(plot1, file = "trend.png", dpi = 700)
+```
+
+Validation Time Plot:
+```{r}
+#Additive
+HWadd.energy <- train |> model(ETS(mw ~ error("A") + trend("A") + season("A")))
+energy.for.add <- HWadd.energy |> fabletools::forecast(h=length(validation$yr_month))
+report(HWadd.energy)
+
+energy.for.add |> autoplot(energy.ts, level = 0) + geom_line(aes(y = .fitted), col="#D55E00", data = augment(HWadd.energy)) + labs(y="Megawatts", title="Avg Megawatts per month (add)") + guides(colour = "none") + theme(legend.position="none")
+
+#Multiplicative
+HWmult.energy <- train |> model(ETS(mw ~ error("M") + trend("A") + season("M")))
+energy.for.mult <- HWmult.energy |> fabletools::forecast(h=length(validation$yr_month))
+report(HWmult.energy)
+
+energy.for.mult|> autoplot(energy.ts, level=0) + geom_line(aes(y = .fitted), col="#D55E00", data = augment(HWmult.energy)) + labs(y="Megawatts", title="Avg Megawatts per months (mult)") + guides(colour = "none") + theme(legend.position="none")
+```
+
+```{r}
+energy_fit <- train |>
+  model(
+    SES = ETS(mw ~ error("A") + trend("N") + season("N")),
+    `Linear` = ETS(mw ~ error("A") + trend("A") + season("N")),
+    `Damped Linear` = ETS(mw ~ error("A") + trend("Ad") + season("N")),
+    HWAdd = ETS(mw ~ error("A") + trend("A") + season("A")),
+    HWMult = ETS(mw ~ error("M") + trend("A") + season("M"))
+  )
+
+energy_fc <- energy_fit |>fabletools::forecast(h = length(validation$yr_month))
+fabletools::accuracy(energy_fc, energy.ts)
+```
+
+```{r}
+sd(validation$mw)
+```
+
+
+```{r}
+energy.for.mult <- HWmult.energy |> fabletools::forecast(h=length(validation$yr_month))
+
+energy.for.mult|> autoplot(validation, level=0) + labs(y="Megawatts", title="Actual vs Predicted Average Megawatts (Aug 2022 - Jul 2023)", x= "Year Month") + theme_minimal() + theme(legend.position = 'none', plot.title = element_text(hjust = 0.5, face = 'bold', size=15), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10))) 
+
+#ggsave(plot2, file = "forecast.png", width = 7, height = 4, dpi = 700)
+```
+
+
+Final Project:
+```{r}
+energy <- read_csv('energy_F2024.csv', show_col_types = FALSE)
+energy
+
+#Convert to date-time and pull out date only
+energy <- energy %>% mutate(datetime_beginning_ept = mdy_hm(energy$datetime_beginning_ept))
+energy <- energy %>% mutate(date = date(energy$datetime_beginning_ept))
+
+#Roll up to total daily MW
+energy2 <- energy %>% group_by(date) %>% summarise(mw=sum(mw))
+
+#Average MW by month
+energy2 <- energy2 %>% mutate(yr_month = yearmonth(energy2$date))
+energy2 <- energy2 %>% group_by(yr_month) %>% summarise(mw=mean(mw))
+
+#Convert to tsibble
+energy.ts <- as_tsibble(energy2, index=yr_month)
+energy.ts
+
+#Create train, validation, and test
+train = energy.month[c(1:48),]
+validation = energy.month[c(49:60),]
+test = energy.month[c(61:72),]
+```
+
+To meet the client's wish for a nonseasonal model, the data was adjusted to eliminate seasonal effects. To do so, Seasonal and Trend using LOESS (STL) decomposition was used to extract the seasonal component from the data. Figure 1 displays the actual MW usage values compared to the seasonally adjusted values for the training dataset. As displayed in Figure 1, the seasonally adjusted data does not have the repetitive seasonal fluctuations seen in the original data. 
+```{r}
+#STL decomposition
+energy_dcmp <- energy.ts |> model(stl = STL(mw))
+components(energy_dcmp)
+
+#seasonal adjust data
+seasonaladj = components(energy_dcmp) %>% dplyr::select(yr_month, season_adjust, mw) %>% rename('mw'=season_adjust, 'actual' = mw)
+seasonaladj = seasonaladj %>% mutate(seasonaldiff = actual-mw)
+
+trainadj = seasonaladj[c(1:48),]
+validationadj = seasonaladj[c(49:60),]
+testadj = seasonaladj[c(61:72),]
+
+train_dcmp = energy.ts[c(1:48),] |> model(stl = STL(mw))
+
+
+train_dcmp_long = components(train_dcmp) %>% dplyr::select(yr_month, season_adjust, mw, trend) %>% pivot_longer(cols = c(season_adjust, mw), names_to = "Metric", values_to = "Value")
+train_dcmp_long
+
+ggplot(train_dcmp_long, aes(x=yr_month, y=Value, color=Metric)) + geom_line(size=0.75) +  scale_color_manual(values = c("mw" = "darkgrey", "season_adjust" = "#D55E00"), labels = c("Actual", "Seasonally Adjusted")) + labs( y = "Megawatts (MW)", x= "Year Month", title = "Seasonally Adjusted Data (Aug 2018 - Jul 2022)" ) + theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+
+#ggsave(plot2, file = "season.png", width = 7, height = 4, dpi = 700)
+```
+
+The seasonally adjusted training data was then used to find the best performing ARIMA model. The team first found that the series was stationary using a KPSS unit root test. The autocorrelation and partial autocorrelation plots both contained a significant spike at the second lag, indicating the potential need for a MA(2) or AR(2) term. An AR(2), MA(2), and ARMA(2,2) model were built, of which the AR(2) had the lowest AICc and thus was chosen as the best performing model. The residuals of the AR(2) model were found to be white noise using the Ljung-Box test, and the predicted values were confirmed to be stationary. Figure 2 displays the plot of MW usage forecasted from the AR(2) model versus the actual data in the validation dataset. 
+```{r}
+#Testing if data is stationary
+# Perform the KPSS test 
+trainadj |> features(mw, unitroot_kpss)
+
+#Perform ndiffs test
+trainadj |> features(mw, unitroot_ndiffs)
+```
+Stationary -> can perform ARIMA
+
+```{r}
+#Autocorrelation plot
+ggAcf(trainadj$mw,lag=12)
+
+#Partial autocorrelation plot
+ggPacf(trainadj$mw,lag=12) 
+```
+Try AR(2), MA(2)
+
+```{r}
+energy_model <- trainadj %>%
+  model(ar2 = ARIMA(mw ~ pdq(2,0,0) + PDQ(0,0,0)),
+        ma2 = ARIMA(mw ~ pdq(0,0,2) + PDQ(0,0,0)),
+        arma22 = ARIMA(mw ~ pdq(2,0,2) + PDQ(0,0,0)),
+        search1 = ARIMA(mw~PDQ(0,0,0)),
+        search2 = ARIMA(mw,stepwise = F))
+
+energy_model2<-as.data.frame(energy_model)
+t(energy_model2)
+glance(energy_model) %>% arrange(AICc) %>% dplyr::select(.model:BIC)
+```
+
+```{r}
+#AR(2) model
+energy_model %>% dplyr::select(ar2) %>% gg_tsresiduals()
+energy_model %>% dplyr::select(ar2) %>% residuals() %>% ggPacf()
+augment(energy_model) %>% filter(.model=='ar2') %>% features(.innov,ljung_box, lag=10, dof = 2)
+
+#MA(2) model
+energy_model %>% dplyr::select(ma2) %>% gg_tsresiduals()
+energy_model %>% dplyr::select(ma2) %>% residuals() %>% ggPacf()
+augment(energy_model) %>% filter(.model=='ma2') %>% features(.innov,ljung_box, lag=10, dof = 2)
+```
+
+
+
+```{r}
+#AR(2) adding back seasonality
+energy_for_ar<-energy_model %>% dplyr::select(ar2) %>% fabletools::forecast(h=length(validationadj$yr_month))
+energy_for_ar_seas <- energy_for_ar %>% mutate(.mean = .mean + validationadj$seasonaldiff)
+ar_df = data.frame(
+  yr_month = energy_for_ar_seas$yr_month,
+  Actual = validationadj$actual,
+  Predicted = energy_for_ar_seas$.mean
+)
+
+ar_data_long <- ar_df%>%
+  pivot_longer(cols = c(Actual, Predicted), names_to = "Metric", values_to = "Value")
+
+#MA(2) adding back seasonality
+energy_for_ma<-energy_model %>% dplyr::select(ma2) %>% fabletools::forecast(h=length(validationadj$yr_month))
+energy_for_ma_seas <- energy_for_ma %>% mutate(.mean = .mean + validationadj$seasonaldiff)
+ma_df = data.frame(
+  yr_month = energy_for_ma_seas$yr_month,
+  Actual = validationadj$actual,
+  Predicted = energy_for_ma_seas$.mean
+)
+
+ma_data_long <- ma_df%>%
+  pivot_longer(cols = c(Actual, Predicted), names_to = "Metric", values_to = "Value")
+
+#AR(2) plot
+ggplot(ar_data_long, aes(x=yr_month, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Average MW", x= "Year Month", subtitle = "Forecasted with AR(2) Model") + 
+    scale_color_manual(values = c("Actual" = "darkblue", "Predicted" = "red")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+
+#MA(2) plot
+ggplot(ma_data_long, aes(x=yr_month, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Average MW - MA(2)", x= "Year Month") + 
+    scale_color_manual(values = c("Actual" = "darkblue", "Predicted" = "red")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+
+#ggsave(plot2, file = "forecast.png", width = 7, height = 5, dpi = 700)
+```
+```{r}
+#White noise test
+ar_df$residuals = ar_df$Actual - ar_df$Predicted
+Box.test(ar_df$residuals, lag = 2, type = "Ljung-Box")
+
+ma_df$residuals = ma_df$Actual - ma_df$Predicted
+Box.test(ma_df$residuals, lag = 2, type = "Ljung-Box")
+
+#Stationary test
+as_tsibble(ar_df) |> features(Predicted, unitroot_kpss)
+as_tsibble(ma_df) |> features(Predicted, unitroot_kpss)
+```
+
+Accuracy Statistics:
+```{r}
+#AR(2) accuracy statistics
+energy_resid_ar<-validationadj$actual-energy_for_ar$.mean
+MAPE<-mean(abs(energy_resid_ar/validationadj$actual))
+MAE<-mean(abs(energy_resid_ar))
+MAPE
+MAE
+
+#MA(2) accuracy statistics
+energy_resid_ma<-validationadj$actual-energy_for_ma$.mean
+MAPE<-mean(abs(energy_resid_ma/validationadj$actual))
+MAE<-mean(abs(energy_resid_ma))
+MAPE
+MAE
+
+sd(validationadj$actual)
+
+fabletools::accuracy(energy_for_ar$.mean, validationadj$actual)
+fabletools::accuracy(energy_for_ma$.mean, validationadj$actual)
+```
+
+
+
+A second method that the team used was to build a Bayesian Structural Time Series (BSTS) with a trigonometric seasonal component. This model used sine and cosine trigonometric functions to model the periodic fluctuations in the data, effectively capturing seasonal patterns.  The residuals of the BSTS model were found to be white noise using the Ljung-Box test, and the predicted values were confirmed to be stationary.
+```{r}
+#Testing if data is stationary
+# Perform the KPSS test 
+train |> features(mw, unitroot_kpss)
+
+#Perform ndiffs test
+train |> features(mw, unitroot_ndiffs)
+```
+
+```{r}
+library(bsts)
+energy.bsts = log(train$mw)
+
+model_components=list()
+model_components = AddLocalLevel(model_components, y = energy.bsts)
+model_components=AddTrig(model_components, y = energy.bsts, period = 12,frequencies = 1:3)
+fit.season=bsts(energy.bsts, model_components, niter = 2000)
+plot(fit.season$final.state[,2],type='l')
+pred.season<-predict(fit.season,burn = 500,horizon = 24)
+plot(pred.season)
+pred.season$interval
+
+```
+
+
+```{r}
+forecast.bsts <- predict(fit.season, burn = 500, horizon = 12)
+forecasted_values <- exp(forecast.bsts$mean)
+validation$predicted = forecasted_values
+validation$actual = validation$mw
+```
+
+```{r}
+validation_long <- validation %>%
+  pivot_longer(cols = c(actual, predicted), names_to = "Metric", values_to = "Value")
+
+#Fitted vs predicted plot
+ggplot(validation_long, aes(x=yr_month, y=Value, color=Metric)) + geom_line(size=0.75) + 
+    labs(y="Megawatts (MW)", title="Actual vs Predicted Average MW", x= "Year Month", subtitle = "Forecasted with BSTS Model") + 
+    scale_color_manual(values = c("actual" = "darkblue", "predicted" = "red"), label = c("Actual", "Predicted")) + 
+    theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = 'bold', size=17), plot.subtitle = element_text(hjust = 0.5, size=13),  axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)), legend.text = element_text(size = 12), legend.title = element_blank(), legend.position = 'bottom')
+
+#Accuracy measures
+energy_resid_bsts<-validation$actual-validation$predicted
+MAPE<-mean(abs(energy_resid_bsts/validation$actual))
+MAE<-mean(abs(energy_resid_bsts))
+MAPE
+MAE
+sd(validation$actual)
+
+#ggsave(plot2, file = "forecast2.png", width = 7, height = 5, dpi = 700)
+```
+
+```{r}
+#White noise test
+validation$residuals = validation$actual - validation$predicted
+Box.test(validation$residuals, lag = 2, type = "Ljung-Box")
+
+#Stationary test
+validation |> features(predicted, unitroot_kpss)
+```
+
+
+```{r}
+![](TimeSeriesHW_files/`unnamed-chunk-2-1.png`)
+
+```
+
+
