@@ -1,0 +1,549 @@
+---
+title: "Time Series Final Project"
+output: html_document
+date: "2024-10-23"
+---
+
+```{r setup, include=FALSE}
+#final time series 😢/😝
+#read in packages
+library(tidyverse)
+library(tseries)
+library(fpp3)
+library(fable.prophet)
+
+
+#### load in data ####
+nrg = read_csv("~/Downloads/Homework2_TS2/hrl_load_metered.csv")
+nrg = nrg[c(1,6)]
+
+#load in validations
+nrg_test_1 <- read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test1.csv")
+nrg_test_2 <- read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test2 copy.csv")
+nrg_test_3 <- read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test3 copy.csv")
+nrg_test_4 <- read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test4.csv")
+nrg_test_5 <- read_csv("~/Downloads/Homework2_TS2/hrl_load_metered - test5.csv")
+
+#combine everything into 1
+nrg_3 <- bind_rows(nrg, nrg_test_1, nrg_test_2)
+
+#bruh found messed up date time in nrg_test_5, ned to format so both sets can be binded
+#nrg_3$datetime_beginning_ept <- as.POSIXct(nrg_3$datetime_beginning_ept, format = "%m/%d/%y %H:%M")
+
+#nrg_test_5 <- nrg_test_5 |> 
+  #mutate(datetime_beginning_ept =  as.POSIXct(datetime_beginning_ept, format = "%m/%d/%Y %I:%M:%S %p"))
+
+#bind the sets and select date and mw
+#nrg <- nrg |> 
+  #bind_rows(nrg_test_5) |> 
+  #dplyr::select(1,2)
+  
+#convert date to correct type for indexing
+nrg_3$datetime_beginning_ept <- as.POSIXct(nrg_3$datetime_beginning_ept, format = "%m/%d/%y %H:%M", tz = "America/New_York")
+
+#Find duplicate date times
+duplicate = duplicates(nrg_3, index = datetime_beginning_ept)
+duplicate1 = duplicate[c(1,3,5,7,9), ]
+duplicate2 = duplicate[c(2,4,6,8,10), ]
+
+#Removed duplicated times from data
+nrg_3 <- nrg_3 %>% filter(!(nrg_3$datetime_beginning_ept %in% duplicate$datetime_beginning_ept))
+duplicates(nrg_3, index = datetime_beginning_ept)
+
+#Add back one set of duplicated times
+nrg_3 = rbind(nrg_3,duplicate1)
+nrg_3 = nrg_3 %>% arrange(datetime_beginning_ept)
+duplicates(nrg_3, index = datetime_beginning_ept)
+
+#Create tsibble
+nrg_3 = as_tsibble(nrg_3, index = datetime_beginning_ept)
+
+#Add removed duplicates back to data 
+nrg_3 <- nrg_3 %>%
+  tsibble::fill_gaps() %>%
+  mutate(mw = ifelse(is.na(mw), duplicate2$mw, mw))
+
+has_gaps(nrg_3)
+nrg_3 %>% filter(is.na(mw))
+nrg_3 %>% filter(datetime_beginning_ept %in% duplicate2$datetime_beginning_ept)
+
+nrg_test_3$datetime_beginning_ept <- as.POSIXct(nrg_test_3$datetime_beginning_ept, format = "%m/%d/%y %H:%M")
+nrg_test_3 = as_tsibble(nrg_test_3,  index = datetime_beginning_ept)
+#weather data
+#read in data
+ky <- read_csv("KY.csv")
+tn <- read_csv("TN.csv")
+va <- read_csv("VA.csv")
+wv <- read_csv("WV.csv")
+
+
+#change data types to match that of earlier --> these time zones are in utc-ish
+tn <- tn |> 
+  dplyr::select(station,valid,tmpf) |> 
+  mutate(valid = mdy_hm(valid)) |> 
+  mutate(valid = as.POSIXct(valid, format = "%m/%d/%y %H:%M", tz = "America/New_York"))
+ky <- ky |> 
+  mutate(valid = as.POSIXct(valid, format = "%m/%d/%y %H:%M", tz = "America/New_York"))
+va <- va |> 
+  mutate(valid = as.POSIXct(valid, format = "%m/%d/%y %H:%M", tz = "America/New_York"))
+wv <- wv |> 
+  mutate(valid = as.POSIXct(valid, format = "%m/%d/%y %H:%M", tz = "America/New_York"))
+
+#round down to the hour
+ky$valid <- floor_date(ky$valid,unit = 'hour')
+tn$valid <- floor_date(tn$valid,unit = 'hour')
+va$valid <- floor_date(va$valid,unit = 'hour')
+wv$valid <- floor_date(wv$valid,unit = 'hour')
+
+#aggregate data by date
+ky <- ky |> 
+  dplyr::select(-station) |> 
+  group_by(valid) |> 
+  dplyr::summarize(tmpf = mean(tmpf))
+
+tn <- tn |> 
+  dplyr::select(-station) |> 
+  group_by(valid) |> 
+  dplyr::summarize(tmpf = mean(tmpf))
+
+va <- va |> 
+  dplyr::select(-station) |> 
+  group_by(valid) |> 
+  dplyr::summarize(tmpf = mean(tmpf))
+
+wv <- wv |> 
+  dplyr::select(-station) |> 
+  group_by(valid) |> 
+  dplyr::summarize(tmpf = mean(tmpf))
+
+#join data
+temp <- ky |> inner_join(tn,by = "valid")
+temp <- temp |> inner_join(va,by = "valid")
+temp <- temp |> inner_join(wv,by = "valid")
+
+#make long dataset and aggregate
+temp <- pivot_longer(temp, cols = c( "tmpf.x","tmpf.y" ,"tmpf.x.x" ,"tmpf.y.y"))
+temp <- temp |> 
+  dplyr::select(-name) |> 
+  group_by(valid) |> 
+  dplyr::summarize(temperature = mean(value))
+
+#join weather onto energy dataset
+nrg_3 <- nrg_3 |> 
+  left_join(temp,by = c('datetime_beginning_ept' = 'valid'))
+
+#using mice
+library(mice)
+nrg_3$temperature = complete(mice(nrg_3, method = "lasso.norm"))$temperature
+
+nrg_3 <- nrg_3 |> 
+  dplyr::select(c(datetime_beginning_ept,mw,temperature))
+
+nrg_3 <- nrg_3 |> 
+  mutate(temperature_quad = temperature^2)
+
+nrg_test_3$temperature = complete(mice(nrg_test_3, method = "lasso.norm"))$temperature
+
+nrg_test_3 <- nrg_test_3 |> 
+  dplyr::select(c(datetime_beginning_ept,mw,temperature))
+
+nrg_test_3 <- nrg_test_3 |> 
+  mutate(temperature_quad = temperature^2)
+```
+
+```{r}
+#write_excel_csv(nrg,"energy_weather.csv")
+
+#### Training/Validation splits ####
+#first fold
+nrg_1 <- nrg %>% filter(ymd(datetime_beginning_ept) <= ymd("2024-09-13"))
+nrg_1_test <- nrg |>  filter(ymd(datetime_beginning_ept) >= ymd("2024-09-13"), ymd(datetime_beginning_ept) <= ymd("2024-09-19"))
+
+#second fold
+nrg_2 <- nrg %>% filter(ymd_hms(datetime_beginning_ept) <= ymd("2024-09-19"))
+nrg_2_test <- nrg |>  filter(ymd_hms(datetime_beginning_ept) >= ymd("2024-09-20"), ymd(datetime_beginning_ept) <= ymd("2024-09-26"))
+
+#third fold
+nrg_3 <- nrg %>% filter(ymd_hms(datetime_beginning_ept) <= ymd_hms("2024-09-26 23:00:00"))
+nrg_3_test <- nrg |>  filter(ymd_hms(datetime_beginning_ept) >= ymd_hms("2024-09-27 00:00:00") & ymd_hms(datetime_beginning_ept) <= ymd_hms("2024-10-03 23:00:00"))
+
+#fourth fold
+nrg_4 <- nrg %>% filter(ymd(datetime_beginning_ept) <= ymd("2024-10-03"))
+nrg_4_test <- nrg |>  filter(ymd(datetime_beginning_ept) >= ymd("2024-10-04"), ymd(datetime_beginning_ept) <= ymd("2024-10-10"))
+
+#fifth fold
+nrg_5 <- nrg %>% filter(ymd(datetime_beginning_ept) <= ymd("2024-10-10"))
+nrg_5_test <- nrg |>  filter(ymd(datetime_beginning_ept) >ymd("2024-10-10"))
+
+#dman this took longer thn I thought wtf
+#### weather predictions for final model 😝####
+#weather average method
+nrg_weather <- nrg |> 
+  dplyr::select(datetime_beginning_ept,temperature)
+
+week_1 <- nrg_weather |>  filter(ymd(datetime_beginning_ept) >= ymd("2018-10-25"), ymd(datetime_beginning_ept) <= ymd("2018-10-31"))
+week_2 <- nrg_weather |>  filter(ymd(datetime_beginning_ept) >= ymd("2019-10-25"), ymd(datetime_beginning_ept) <= ymd("2019-10-31"))
+week_3 <- nrg_weather |>  filter(ymd(datetime_beginning_ept) >= ymd("2020-10-25"), ymd(datetime_beginning_ept) <= ymd("2020-10-31"))
+week_4 <- nrg_weather |>  filter(ymd(datetime_beginning_ept) >= ymd("2021-10-25"), ymd(datetime_beginning_ept) <= ymd("2021-10-31"))
+week_5 <- nrg_weather |>  filter(ymd(datetime_beginning_ept) >= ymd("2022-10-25"), ymd(datetime_beginning_ept) <= ymd("2022-10-31"))
+week_6 <- nrg_weather |>  filter(ymd(datetime_beginning_ept) >= ymd("2023-10-25"), ymd(datetime_beginning_ept) <= ymd("2023-10-31"))
+
+weather <- bind_cols(week_1,week_2,week_3,week_4,week_5,week_6)
+
+weather$avg_temp <- rowMeans(weather[c(2,4,6,8,10,12)])
+
+weather$weight_avg_temp <- (weather[[2]] * 0.025) + (weather[[4]] * 0.025) + (weather[[6]] * 0.025) + (weather[[8]] * 0.025) + 
+  (weather[[10]] * 0.1) + (weather[[12]] * 0.8)
+
+```
+
+```{r}
+count_gaps(nrg_3_test)
+nrg_test_3
+```
+
+
+```{r}
+#### weather model ####
+#time to model ohhh yeaaaaa
+weather_model <- nrg_3 %>%
+  model(ARIMA(mw ~ temperature)) 
+report(weather_model)
+
+weather_model %>%
+  gg_tsresiduals()
+
+augment(weather_model) %>%
+  features(.innov, ljung_box, lag = 168, dof = 6)
+
+weather_model_forecast <- forecast::forecast(weather_model, nrg_test_3)
+
+fabletools::accuracy(weather_model_forecast, nrg_test_3)
+
+nrg_test_3$predictions <- weather_model_forecast$.mean
+
+ggplot(nrg_test_3, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Prediction")) + 
+  geom_line(aes(y = mw, color = "Average MW")) +
+  scale_color_manual(values = c("Prediction" = "skyblue", "Average MW" = "coral2")) + 
+  xlab("Month") + 
+  ylab("Average Megawatts (per month)") +#crazy dip on october 8? Hurricane milton??
+  ggtitle("Forecast with weather arima model")
+
+#### weather arima w/ seasonal ####
+nrg_3 |> gg_tsdisplay(difference(mw,24),plot_type = 'partial', lag = 72)
+
+weather_arima <- nrg_3 |> 
+  model(ARIMA(mw ~ temperature + pdq(1,1,0) + PDQ(2,1,2)))
+
+weather_arima %>%
+  gg_tsresiduals()
+
+augment(weather_arima) %>%
+  features(.innov, ljung_box, lag = 168, dof = 6)
+
+weather_arima_forecast <- forecast::forecast(weather_arima, nrg_3_test)
+
+fabletools::accuracy(weather_arima_forecast, nrg_3_test)
+
+nrg_3_test$predictions <- weather_arima_forecast$.mean
+
+ggplot(nrg_3_test, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Prediction")) + 
+  geom_line(aes(y = mw, color = "Average MW")) +
+  scale_color_manual(values = c("Prediction" = "skyblue", "Average MW" = "coral2")) + 
+  xlab("Month") + 
+  ylab("Average Megawatts (per month)")+ #crazy dip on october 8? Hurricane milton??
+  ggtitle("Forecast with seasonal weather arima model")
+
+
+#### prophet preproc ####
+
+#create holidays
+library(tis)
+halloween <- data.frame(
+  holiday = 'halloween',
+  ds = as.Date(c('2018-10-31', '2019-10-31','2020-10-31',
+                 '2021-10-31', '2022-10-31','2023-10-31')),
+  lower_window = 0,
+  upper_window = 0
+)
+
+diwali <- data.frame(
+  holiday = 'diwali',
+  ds = as.Date(c('2018-11-07', '2019-10-27','2020-11-14',
+                 '2021-11-04', '2022-10-24','2023-11-12')),
+  lower_window = 0,
+  upper_window = 0
+)
+
+
+holidays <- bind_rows(halloween, diwali)
+
+library(fable.prophet)
+
+#### avas prophet ####
+model_prophet2 <- nrg_3 %>%
+  model(prophet(mw ~ growth("linear") +
+                  season(period = "year", order = 6, type = "additive") +
+                  season(period = "week", order = 3) +
+                  season(period = "day", order = 12) +
+                  holiday(holidays = holidays)))
+
+model_prophet2 %>%
+  components() %>%
+  autoplot()
+
+model_prophet2 %>%
+  gg_tsresiduals()
+
+augment(model_prophet2) %>%
+  features(.innov, ljung_box, lag = 36, dof = 5)
+
+model_prophet_for2 <- forecast::forecast(model_prophet2, nrg_3_test)
+
+fabletools::accuracy(model_prophet_for2, nrg_3_test)
+
+nrg_3_test$predictions <- model_prophet_for2$.mean
+
+ggplot(nrg_3_test, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Predicted Forecast")) + 
+  geom_line(aes(y = mw, color = "Actual Megawatts")) +
+  scale_color_manual(values = c("Predicted Forecast" = "skyblue", "Actual Megawatts" = "coral2")) + 
+  xlab("Day") + 
+  ylab("Hourly MW Usage")+ 
+  ggtitle("Prophet Model Forecast") + 
+  theme(legend.position = "bottom")
+
+#### weather prophet ####
+
+model_prophet_weather <- nrg_3 %>%
+  model(prophet(mw ~ temperature + temperature_quad +
+                  growth("linear") +
+                  season(period = "year", order = 8, type = "additive") +
+                  season(period = "month", order = 7)+
+                  season(period = "day", order = 12) +
+                  holiday(holidays = holidays)))
+
+model_prophet_weather %>%
+  components() %>%
+  autoplot()
+
+model_prophet_weather %>%
+  gg_tsresiduals()
+
+augment(model_prophet_weather) %>%
+  features(.innov, ljung_box, lag = 36, dof = 5)
+
+model_prophet_weather_forecast <- forecast::forecast(model_prophet_weather, nrg_3_test)
+
+fabletools::accuracy(model_prophet_weather_forecast, nrg_3_test)
+
+nrg_3_test$predictions <- model_prophet_weather_forecast$.mean
+
+ggplot(nrg_3_test, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Prediction")) + 
+  geom_line(aes(y = mw, color = "Average MW")) +
+  scale_color_manual(values = c("Prediction" = "skyblue", "Average MW" = "coral2")) + 
+  xlab("Day") + 
+  ylab("Hourly MW Usage") + 
+  ggtitle("Prophet Weather Model Forecast") + 
+  theme(legend.position = "bottom")
+
+
+
+#### neural network ####
+set.seed(12345)
+
+nrg_weather_diff <- nrg_3 %>%
+  mutate(diff_mw = difference(mw, 24)) %>% filter(!is.na(diff_mw))
+
+model_nnet <- nrg_weather_diff %>%
+  model(
+    hand3 = NNETAR(diff_mw ~ AR(p = 2, P = 3)),
+    hand3_temp = NNETAR(diff_mw ~ temperature + AR(p = 2, P = 3)), #BEST MODEL
+    hand3_quadtemp = NNETAR(diff_mw ~ temperature + temperature_quad + AR(p = 2, P = 3))
+  )
+
+model_nnet_for <- forecast::forecast(model_nnet, nrg_3_test)
+
+nnet_for_hand3 <- rep(NA, 168)
+nnet_for_hand3_temp <- rep(NA, 168)
+nnet_for_hand3_quadtemp <- rep(NA, 168)
+
+model_nnet_for_hand3 = model_nnet_for %>% filter(.model=='hand3')
+model_nnet_for_hand3_temp = model_nnet_for %>% filter(.model=='hand3_temp')
+model_nnet_for_hand3_quadtemp = model_nnet_for %>% filter(.model=='hand3_quadtemp')
+
+last_value <- tail(nrg_3$mw, 24)
+
+for(i in 1:24){
+  nnet_for_hand3[i] <- last_value[i] + model_nnet_for_hand3$.mean[i]
+}
+for(i in 25:168){
+  nnet_for_hand3[i] <- nnet_for_hand3[i - 24] + model_nnet_for_hand3$.mean[i]
+}
+for(i in 1:24){
+  nnet_for_hand3_temp[i] <- last_value[i] + model_nnet_for_hand3_temp$.mean[i]
+}
+for(i in 25:168){
+  nnet_for_hand3_temp[i] <- nnet_for_hand3_temp[i - 24] + model_nnet_for_hand3_temp$.mean[i]
+}
+for(i in 1:24){
+  nnet_for_hand3_quadtemp[i] <- last_value[i] + model_nnet_for_hand3_quadtemp$.mean[i]
+}
+for(i in 25:168){
+  nnet_for_hand3_quadtemp[i] <- nnet_for_hand3_quadtemp[i - 24] + model_nnet_for_hand3_quadtemp$.mean[i]
+}
+
+
+NN_error_hand3 <- nrg_3_test$mw - nnet_for_hand3
+NN_MAE_hand3 <- mean(abs(NN_error_hand3))
+NN_MAPE_hand3 <- mean(abs(NN_error_hand3)/abs(nrg_3_test$mw))*100
+
+NN_error_hand3_temp <- nrg_3_test$mw - nnet_for_hand3_temp
+NN_MAE_hand3_temp <- mean(abs(NN_error_hand3_temp))
+NN_MAPE_hand3_temp <- mean(abs(NN_error_hand3_temp)/abs(nrg_3_test$mw))*100
+
+NN_error_hand3_quadtemp <- nrg_3_test$mw - nnet_for_hand3_quadtemp
+NN_MAE_hand3_quadtemp <- mean(abs(NN_error_hand3_quadtemp))
+NN_MAPE_hand3_quadtemp <- mean(abs(NN_error_hand3_quadtemp)/abs(nrg_3_test$mw))*100
+
+
+#### Temperature Forecast ####
+temp <- nrg_3 |> 
+  model(esm = ETS(temperature~error("A") + trend("A") + season("A")))
+
+nrg_3 |>
+  features(temperature, feat_stl)
+
+temp_for <- temp |> forecast::forecast(h = nrow(nrg_3_test))
+
+accuracy(temp_for, nrg_3_test)
+
+nrg_3_test$predictions <- temp_for$.mean
+
+ggplot(nrg_3_test, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Predicted Forecast")) + 
+  geom_line(aes(y = temperature, color = "Actual Megawatts")) +
+  scale_color_manual(values = c("Predicted Forecast" = "skyblue", "Actual Megawatts" = "coral2")) + 
+  xlab("Day") + 
+  ylab("Hourly MW Usage")+ 
+  ggtitle("Prophet Model Forecast") + 
+  theme(legend.position = "bottom")
+
+
+#### ensemble model ####
+#both propher models should be tried
+
+prophet_ensemble <- nrg_3 |> 
+  model(prophet_weather = prophet(mw ~ temperature + 
+                                    growth("linear") +
+                                    season(period = "year", order = 6, type = "additive") +
+                                    season(period = "week", order = 3) +
+                                    season(period = "day", order = 24) +
+                                    holiday(holidays = holidays)),
+        prophet = prophet(mw ~ growth("linear") +
+                            season(period = "year", order = 6, type = "additive") +
+                            season(period = "week", order = 3) +
+                            season(period = "day", order = 12) +
+                            holiday(holidays = holidays))) |> 
+  mutate(ensemble = (prophet_weather + prophet)/2)
+
+ensemble_forecast <- prophet_ensemble |> 
+  forecast::forecast(nrg_3_test)
+
+ensemble_forecast |> 
+  autoplot()
+
+ensemble_forecast |> accuracy(nrg_3_test) |> 
+  arrange(MAPE)
+
+nrg_3_test$predictions <- ensemble_forecast[ensemble_forecast[,1] == "ensemble",]$.mean
+
+ggplot(nrg_3_test, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Predicted Forecast")) + 
+  geom_line(aes(y = mw, color = "Actual Megawatts")) +
+  scale_color_manual(values = c("Predicted Forecast" = "skyblue", "Actual Megawatts" = "coral2")) + 
+  xlab("Day") + 
+  ylab("Average Megawatts (per hour)")+ 
+  ggtitle("Prophet Model Forecast") + 
+  theme(legend.position = "bottom")
+
+## ensemble two
+
+models <- nrg_3 |> 
+  model(arimax_weather = ARIMA(mw ~ temperature + pdq(1,1,0) + PDQ(2,1,2)),
+        prophet_weather = prophet(mw ~ temperature + 
+                                    growth("linear") +
+                                    season(period = "year", order = 6, type = "additive") +
+                                    season(period = "week", order = 3) +
+                                    season(period = "day", order = 24) +
+                                    holiday(holidays = holidays)),
+        prophet = prophet(mw ~ growth("linear") +
+                            season(period = "year", order = 6, type = "additive") +
+                            season(period = "week", order = 3) +
+                            season(period = "day", order = 12) +
+                            holiday(holidays = holidays))) |> 
+  mutate(ensemble = (arimax_weather + prophet)/2,
+         full =  (arimax_weather + prophet+prophet_weather)/3)
+
+
+ensemble_forecast <- models |> 
+  forecast::forecast(nrg_3_test)
+
+ensemble_forecast |> 
+  autoplot()
+
+ensemble_forecast |> accuracy(nrg_3_test) |> 
+  arrange(MAPE)
+
+nrg_3_test$predictions <- ensemble_forecast[ensemble_forecast[,1] == "ensemble",]$.mean
+
+ggplot(nrg_3_test, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Predicted Forecast")) + 
+  geom_line(aes(y = mw, color = "Actual Megawatts")) +
+  scale_color_manual(values = c("Predicted Forecast" = "skyblue", "Actual Megawatts" = "coral2")) + 
+  xlab("Day") + 
+  ylab("Average Megawatts (per month)")+ 
+  ggtitle("Prophet Model Forecast") + 
+  theme(legend.position = "bottom")
+
+## ensemble 3
+models <- nrg_3 |> 
+  model(arimax_weather = ARIMA(mw ~ temperature + pdq(1,1,0) + PDQ(2,1,2)),
+        prophet_weather = prophet(mw ~ temperature + temperature_quad +
+                                    growth("linear") +
+                                    season(period = "year", order = 6, type = "additive") +
+                                    season(period = "day", order = 24) +
+                                    holiday(holidays = holidays)),
+        #neural = NNETAR(mw ~ temperature + AR(p = 2, P = 3)),
+        esm = ETS(mw~error("A") + trend("A") + season("A"))) |> 
+  mutate(ensemble = (arimax_weather + prophet_weather)/2,
+         full = (arimax_weather + prophet_weather + esm)/3)
+
+
+ensemble_forecast <- models |> 
+  forecast::forecast(nrg_3_test)
+
+ensemble_forecast |> 
+  autoplot()
+
+ensemble_forecast |> accuracy(nrg_3_test) |> 
+  arrange(MAPE)
+
+nrg_3_test$predictions <- ensemble_forecast[ensemble_forecast[,1] == "ensemble",]$.mean
+
+ggplot(nrg_3_test, aes(x = as.POSIXct(datetime_beginning_ept))) + 
+  geom_line(aes(y = predictions, color = "Predicted Forecast")) + 
+  geom_line(aes(y = mw, color = "Actual Megawatts")) +
+  scale_color_manual(values = c("Predicted Forecast" = "skyblue", "Actual Megawatts" = "coral2")) + 
+  xlab("Day") + 
+  ylab("Average Megawatts (per month)")+ 
+  ggtitle("Prophet Model Forecast") + 
+  theme(legend.position = "bottom")
+
+
+#want a prophet that under predicts and a prophet that over predicts
+```
+
