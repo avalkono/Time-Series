@@ -1,0 +1,106 @@
+---
+title: "Time Series HW 2"
+output: github_document
+date: "2024-09-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readr)
+library(fpp3)
+library(datasets)
+library(fable)
+library(fabletools)
+library(lubridate)
+library(expsmooth)
+library(lmtest)
+library(zoo)
+library(seasonal)
+library(ggplot2)
+library(seasonalview)
+library(aTSA)
+```
+
+```{r}
+energy <- read_csv('energy_F2024.csv', show_col_types = FALSE)
+
+#Convert to date-time and pull out date only
+energy <- energy %>% mutate(datetime_beginning_ept = mdy_hm(energy$datetime_beginning_ept))
+energy <- energy %>% mutate(date = date(energy$datetime_beginning_ept))
+
+#Roll up to total daily MW
+energy2 <- energy %>% group_by(date) %>% summarise(mw=sum(mw))
+
+#Average MW by month
+energy2 <- energy2 %>% mutate(yr_month = yearmonth(energy2$date))
+energy2 <- energy2 %>% group_by(yr_month) %>% summarise(mw=mean(mw))
+energy2
+
+#Convert to tsibble
+energy.ts <- as_tsibble(energy2, index=yr_month)
+energy.ts
+
+#Create train, validation, and test
+train = energy.ts[c(1:48),]
+validation = energy.ts[c(49:60),]
+test = energy.ts[c(61:72),]
+```
+
+Training Dataset Trend (STL decomposition):
+```{r}
+energy_dcmp <- train |> model(stl = STL(mw))
+components(energy_dcmp)
+
+#decomposition plot
+components(energy_dcmp) |> autoplot() + theme_classic()
+
+#decomposition trend overlay
+components(energy_dcmp) |> as_tsibble() |> autoplot(mw, colour="black") + geom_line(aes(y=trend), colour = "#D55E00", size=1) + labs( y = "Megawatts", x="Year Month", title = "Average Megawatts Per Month (Aug 2018 - Jul 2022)", subtitle="Overlaid with STL Decomposition Trend" ) + theme_minimal() + theme(legend.position="none", plot.title = element_text(hjust = 0.5, face = 'bold', size=15), plot.subtitle = element_text(hjust = 0.5, size=13), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10)))
+```
+
+ESM Models:
+```{r}
+energy_fit <- train |>
+  model(
+    SES = ETS(mw ~ error("A") + trend("N") + season("N")),
+    `Linear` = ETS(mw ~ error("A") + trend("A") + season("N")),
+    `Damped Linear` = ETS(mw ~ error("A") + trend("Ad") + season("N")),
+    HWAdd = ETS(mw ~ error("A") + trend("A") + season("A")),
+    HWMult = ETS(mw ~ error("M") + trend("A") + season("M"))
+  )
+
+energy_fc <- energy_fit |>fabletools::forecast(h = length(validation$yr_month))
+fabletools::accuracy(energy_fc, energy.ts)
+```
+
+
+Validation Time Plots:
+```{r}
+#Additive
+HWadd.energy <- train |> model(ETS(mw ~ error("A") + trend("A") + season("A")))
+energy.for.add <- HWadd.energy |> fabletools::forecast(h=length(validation$yr_month))
+report(HWadd.energy)
+
+energy.for.add |> autoplot(energy.ts, level = 0) + geom_line(aes(y = .fitted), col="#D55E00", data = augment(HWadd.energy)) + labs(y="Megawatts", title="Avg Megawatts per month (add)") + guides(colour = "none") + theme(legend.position="none")
+
+#Multiplicative
+HWmult.energy <- train |> model(ETS(mw ~ error("M") + trend("A") + season("M")))
+energy.for.mult <- HWmult.energy |> fabletools::forecast(h=length(validation$yr_month))
+report(HWmult.energy)
+
+energy.for.mult|> autoplot(energy.ts, level=0) + geom_line(aes(y = .fitted), col="#D55E00", data = augment(HWmult.energy)) + labs(y="Megawatts", title="Avg Megawatts per months (mult)") + guides(colour = "none") + theme(legend.position="none")
+```
+
+
+```{r}
+energy.for.mult <- HWmult.energy |> fabletools::forecast(h=length(validation$yr_month))
+
+energy.for.mult|> autoplot(validation, level=0) + labs(y="Megawatts", title="Actual vs Predicted Average Megawatts (Aug 2022 - Jul 2023)", x= "Year Month") + theme_minimal() + theme(legend.position = 'none', plot.title = element_text(hjust = 0.5, face = 'bold', size=15), axis.title = element_text(size=13, face='bold'), axis.text = element_text(color='black', size=10), axis.title.x = element_text(margin = margin(t=10)), axis.title.y = element_text(margin = margin(r=10))) 
+```
+
+```{r}
+sd(validation$mw)
+```
+
+
